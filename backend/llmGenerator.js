@@ -22,7 +22,7 @@ import {
 
 const MODEL =
   process.env.SAGE_LLM_MODEL ||
-  "gemini-3.7-flash";
+  "gemini-2.5-flash";
 
 const FALLBACK_MODEL =
   process.env.SAGE_LLM_FALLBACK_MODEL ||

@@ -4,7 +4,7 @@ import {
 
 const MODEL =
   process.env.SAGE_LLM_MODEL ||
-  "gemini-3.7-flash";
+  "gemini-2.5-flash";
 
 function clean(value) {
   if (value === null || value === undefined) {
