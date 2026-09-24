@@ -335,7 +335,9 @@ export async function callSageRawPredict({
         llm_model_name:
           llmModelName ||
           process.env.SAGE_LLM_MODEL ||
-          "gemini-2.5-flash"
+          "gemini-3.5-flash",
+        location:"global"
+
       };
 
       const response = await fetch(SAGE_RAW_PREDICT_URL, {
