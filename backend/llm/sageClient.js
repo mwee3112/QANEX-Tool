@@ -2,7 +2,18 @@ const SAGE_RAW_PREDICT_URL =
   process.env.SAGE_RAW_PREDICT_URL ||
   "https://sage.paastry.sysco.net/api/sysco-gen-ai-platform/agents/v1/content/6a9d54ca8f549f3fcef8b291/DEV/raw-predict";
 
+const SAGE_ANTHROPIC_RAW_PREDICT_URL =
+  process.env.SAGE_ANTHROPIC_RAW_PREDICT_URL ||
+  "https://sage-stg.paastry.sysco.net/api/sysco-gen-ai-platform/agents/v1/content/68516818616beb42263637ec/dev/direct-raw-predict";
+
+const SAGE_ANTHROPIC_MAX_TOKENS =
+  Number(process.env.SAGE_ANTHROPIC_MAX_TOKENS) || 16384;
+
 const SAGE_DEFAULT_BEARER = "<your-token-here>";
+
+function isAnthropicModel(model) {
+  return /^claude/i.test(String(model || "").trim());
+}
 
 function clean(value) {
   if (value === null || value === undefined) {
@@ -20,8 +31,9 @@ function clean(value) {
   }
 }
 
-function normalizeBearerToken() {
+function normalizeBearerToken(anthropic = false) {
   const configured =
+    (anthropic && process.env.SAGE_ANTHROPIC_BEARER_TOKEN) ||
     process.env.SAGE_BEARER_TOKEN ||
     process.env.SAGE_AUTH_TOKEN ||
     SAGE_DEFAULT_BEARER;
@@ -260,6 +272,144 @@ function extractTextFromSageResponse(payload) {
   return clean(payload);
 }
 
+function findAnthropicMessage(payload) {
+  const candidates = [
+    payload,
+    payload?.data,
+    payload?.data?.data,
+    payload?.data?.response,
+    payload?.response,
+    payload?.result
+  ];
+
+  return (
+    candidates.find(
+      candidate =>
+        candidate &&
+        typeof candidate === "object" &&
+        (Array.isArray(candidate.content) ||
+          typeof candidate.content === "string") &&
+        (candidate.type === "message" ||
+          candidate.role === "assistant" ||
+          "stop_reason" in candidate)
+    ) || null
+  );
+}
+
+function extractTextFromAnthropicResponse(payload) {
+  const message = findAnthropicMessage(payload);
+
+  if (!message) {
+    return extractTextFromSageResponse(payload);
+  }
+
+  if (message.stop_reason === "max_tokens") {
+    console.warn(
+      `[SAGE] Anthropic response was truncated at max_tokens (${SAGE_ANTHROPIC_MAX_TOKENS}).`
+    );
+  }
+
+  if (typeof message.content === "string") {
+    return message.content;
+  }
+
+  return message.content
+    .filter(block => block?.type === "text" && typeof block.text === "string")
+    .map(block => block.text)
+    .join("\n")
+    .trim();
+}
+
+function buildGeminiPayload({
+  systemInstruction,
+  prompt,
+  llmModelName,
+  llmGenerationConfig,
+  safetySettings
+}) {
+  return {
+    contents: [
+      {
+        role: "user",
+        parts: [
+          {
+            text: String(systemInstruction || "You are a helpful assistant.")
+          }
+        ]
+      },
+      {
+        role: "user",
+        parts: [
+          {
+            text: String(prompt || "")
+          }
+        ]
+      }
+    ],
+    llm_generation_config: {
+      temperature: 0.1,
+      top_p: 1.0,
+      top_k: 40,
+      candidate_count: 1,
+      max_output_tokens: 16384,
+      frequency_penalty: 0.0,
+      presence_penalty: 0.0,
+      thinking_config: {
+        thinking_budget: 100
+      },
+      stop_sequences: ["END"],
+      response_logprobs: false,
+      response_mime_type: "application/json",
+      response_schema: {
+        type: "object",
+        properties: {
+          answer: {
+            type: "string"
+          }
+        }
+      },
+      ...(llmGenerationConfig || {})
+    },
+    safety_settings:
+      safetySettings || [
+        {
+          category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          threshold: "BLOCK_MEDIUM_AND_ABOVE"
+        }
+      ],
+    llm_model_name: llmModelName,
+    location: "global"
+  };
+}
+
+function buildAnthropicPayload({
+  systemInstruction,
+  prompt,
+  llmModelName,
+  llmGenerationConfig
+}) {
+  return {
+    data: {
+      model: llmModelName,
+      max_tokens: llmGenerationConfig?.max_output_tokens || SAGE_ANTHROPIC_MAX_TOKENS,
+      temperature: llmGenerationConfig?.temperature ?? 0.1,
+      system: String(systemInstruction || "You are a helpful assistant."),
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: String(prompt || "")
+            }
+          ]
+        }
+      ],
+      stream: false
+    }
+  };
+}
+
 export async function callSageRawPredict({
   systemInstruction,
   prompt,
@@ -271,6 +421,28 @@ export async function callSageRawPredict({
 }) {
   let lastError = null;
 
+  const model =
+    llmModelName ||
+    process.env.SAGE_LLM_MODEL ||
+    "gemini-3.5-flash";
+
+  const anthropic = isAnthropicModel(model);
+  const url = anthropic ? SAGE_ANTHROPIC_RAW_PREDICT_URL : SAGE_RAW_PREDICT_URL;
+  const payload = anthropic
+    ? buildAnthropicPayload({
+        systemInstruction,
+        prompt,
+        llmModelName: model,
+        llmGenerationConfig
+      })
+    : buildGeminiPayload({
+        systemInstruction,
+        prompt,
+        llmModelName: model,
+        llmGenerationConfig,
+        safetySettings
+      });
+
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const controller = new AbortController();
 
@@ -279,74 +451,13 @@ export async function callSageRawPredict({
     }, timeoutMs);
 
     try {
-      const payload = {
-        contents: [
-          {
-            role: "user",
-            parts: [
-              {
-                text:
-                  String(systemInstruction || "You are a helpful assistant.")
-              }
-            ]
-          },
-          {
-            role: "user",
-            parts: [
-              {
-                text: String(prompt || "")
-              }
-            ]
-          }
-        ],
-        llm_generation_config: {
-          temperature: 0.1,
-          top_p: 1.0,
-          top_k: 40,
-          candidate_count: 1,
-          max_output_tokens: 16384,
-          frequency_penalty: 0.0,
-          presence_penalty: 0.0,
-          thinking_config: {
-            thinking_budget: 100
-          },
-          stop_sequences: [
-            "END"
-          ],
-          response_logprobs: false,
-          response_mime_type: "application/json",
-          response_schema: {
-            type: "object",
-            properties: {
-              answer: {
-                type: "string"
-              }
-            }
-          },
-          ...(llmGenerationConfig || {})
-        },
-        safety_settings:
-          safetySettings || [
-            {
-              category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-              threshold: "BLOCK_MEDIUM_AND_ABOVE"
-            }
-          ],
-        llm_model_name:
-          llmModelName ||
-          process.env.SAGE_LLM_MODEL ||
-          "gemini-3.5-flash",
-        location:"global"
-
-      };
-
-      const response = await fetch(SAGE_RAW_PREDICT_URL, {
+      const response = await fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Accept": "application/json",
           "User-Agent": process.env.SAGE_USER_AGENT || "insomnium/1.3.0",
-          "Authorization": `Bearer ${normalizeBearerToken()}`
+          "Authorization": `Bearer ${normalizeBearerToken(anthropic)}`
         },
         body: JSON.stringify(payload),
         signal: controller.signal
@@ -366,7 +477,9 @@ export async function callSageRawPredict({
         parsedBody = rawBody;
       }
 
-      return extractTextFromSageResponse(parsedBody);
+      return anthropic
+        ? extractTextFromAnthropicResponse(parsedBody)
+        : extractTextFromSageResponse(parsedBody);
     } catch (error) {
       lastError = error;
 

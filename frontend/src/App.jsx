@@ -383,6 +383,14 @@ function App() {
     setActiveCell(null);
   };
 
+  const clearGeneratedTestCases = () => {
+    sessionStorage.removeItem("qanex-result");
+    setResult(null);
+    setOriginalTestCases([]);
+    setError("");
+    setActiveCell(null);
+  };
+
   const startCellEdit = (rowIndex, field) => {
     setActiveCell({ rowIndex, field });
   };
@@ -682,13 +690,23 @@ function App() {
               </p>
             </div>
 
-            <button
-              className="export-button"
-              onClick={exportToExcel}
-              disabled={!testCases.length}
-            >
-              Export Excel
-            </button>
+            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+              <button
+                className="export-button"
+                onClick={exportToExcel}
+                disabled={!testCases.length}
+              >
+                Export Excel
+              </button>
+
+              <button
+                className="clear-button"
+                onClick={clearGeneratedTestCases}
+                disabled={!result || !testCases.length}
+              >
+                Clear Generated Test Cases
+              </button>
+            </div>
           </section>
         )}
 
